@@ -1,0 +1,15 @@
+# 从源码构建并注入到 packages/ 的第三方 OpenWrt 软件包清单
+# build-packages.sh 会用 OpenWrt SDK 逐条构建，产物（.apk/.ipk）复制到 packages/。
+#
+# 每行格式（空格分隔）:
+#   <git_url> [<branch_or_tag_or_commit>] [<package_path>]
+#     git_url       源码仓库地址（.git 可省略）
+#     ref           可选，git 检出的分支/标签，或 commit hash（完整克隆后检出，较慢）
+#     package_path  可选，clone 到 SDK 的 package/ 目录名及 make 路径；
+#                   留空则取仓库名（去掉 .git）
+#
+# 以 # 开头的行是注释，空行忽略。
+# 适用对象：使用标准 OpenWrt package.mk 的软件包（多数 luci-app-* 配置/前端包）。
+# 如需依赖 luci.mk 的包，可用 FEEDS=luci ./build-packages.sh 按需加速安装 feeds。
+
+https://github.com/lvqier/luci-app-dnsmasq-ipset
