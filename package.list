@@ -1,5 +1,7 @@
-# 从源码构建并注入到 packages/ 的第三方 OpenWrt 软件包清单
-# build-packages.sh 会用 OpenWrt SDK 逐条构建，产物（.apk/.ipk）复制到 packages/。
+# 从源码构建的第三方 OpenWrt 软件包清单。
+# build-packages.sh 用 OpenWrt SDK 逐条构建（每个架构独立构建一次），
+# 仅复制本包自身产物（不含附带运行时库）到 packages/<target>/<subtarget>/（按架构隔离）。
+# build.sh 会自动把这里声明的包名追加进 PACKAGES 一并安装（无需在 build.sh 重复列出）。
 #
 # 每行格式（空格分隔）:
 #   <git_url> [<branch_or_tag_or_commit>] [<package_path>]

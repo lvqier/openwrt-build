@@ -1,0 +1,113 @@
+name: release
+
+# 发布工作流：手动触发 → 构建全部架构 → 创建 git tag → 创建 GitHub Release 并附加产物。
+#
+# 用法：Actions → release → Run workflow，填写 dist（OpenWrt 版本）与 tag（留空则用 openwrt-<dist>）。
+# 构建复用 build.yml（可复用 workflow），产物结构与 build.yml 一致：
+#   targets/<target>/<subtarget>/  固件
+#   packages/<target>/<subtarget>/ 源码构建的 apk
+# 产物会打包成单个 openwrt-<dist>.zip 附加到 Release。
+
+on:
+  workflow_dispatch:
+    inputs:
+      dist:
+        description: 'OpenWrt 版本（snapshots 表示快照）'
+        required: true
+        default: '25.12.5'
+      tag:
+        description: '要创建的 Git tag（留空则用 openwrt-<dist>）'
+        required: false
+        default: ''
+      prerelease:
+        description: '标记为预发布（prerelease）'
+        type: boolean
+        default: false
+      build_packages:
+        description: '从源码构建 package.list 中的包'
+        type: boolean
+        default: true
+      feeds:
+        description: 'FEEDS 列表（逗号分隔，默认 luci；填 all 表示全部）'
+        required: false
+        default: 'luci'
+      mirror:
+        description: '镜像源（留空=官方）'
+        required: false
+        default: ''
+
+permissions:
+  contents: write   # 创建 tag 与 release 需要
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # 复用 build.yml 完成按架构并行构建与合并产物
+  build:
+    uses: ./.github/workflows/build.yml
+    with:
+      dist: ${{ inputs.dist }}
+      build_packages: ${{ inputs.build_packages }}
+      feeds: ${{ inputs.feeds }}
+      mirror: ${{ inputs.mirror }}
+
+  # 打 tag 并创建 Release、附加产物
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+    steps:
+      - name: 设置参数
+        env:
+          IN_TAG: ${{ inputs.tag }}
+          IN_DIST: ${{ inputs.dist }}
+        run: |
+          set -eu
+          TAG="${IN_TAG:-openwrt-${IN_DIST}}"
+          echo "TAG=${TAG}" >> "$GITHUB_ENV"
+          echo "DIST=${IN_DIST}" >> "$GITHUB_ENV"
+
+      - name: 下载所有 profile 产物
+        uses: actions/download-artifact@v4
+        with:
+          pattern: openwrt-${{ inputs.dist }}-*
+          path: dist
+          # 不 merge：每个 artifact 进入 dist/<artifact-name>/ 子目录
+
+      - name: 每个 profile 打包为 zip
+        run: |
+          set -eu
+          mkdir -p zips
+          for d in dist/*/; do
+            name=$(basename "$d")
+            (cd "$d" && zip -rq "../../zips/${name}.zip" .)
+            echo "打包: zips/${name}.zip"
+          done
+          ls -1 zips/
+
+      - name: 检查 tag 是否已存在
+        run: |
+          set -eu
+          if gh api "repos/${GITHUB_REPOSITORY}/git/refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "错误: tag '${TAG}' 已存在，请改用其它 tag。" >&2
+            exit 1
+          fi
+          echo "tag '${TAG}' 可用，将指向 commit ${GITHUB_SHA}"
+
+      - name: 创建 Release（自动建 tag 并上传产物）
+        run: |
+          set -eu
+          notes=$(printf 'OpenWrt %s 二次打包固件（每个 profile 一个 zip）。\n\n产物结构：\n- targets/<target>/<subtarget>/  固件镜像\n- packages/<target>/<subtarget>/ 源码构建的 apk\n\n设备清单见 device.list。' "${DIST}")
+          args=(release create "${TAG}"
+            --title "${TAG}"
+            --notes "${notes}"
+            --target "${GITHUB_SHA}")
+          if [ "${{ inputs.prerelease }}" = "true" ]; then
+            args+=(--prerelease)
+          fi
+          args+=(zips/*.zip)
+          gh "${args[@]}"
+          echo "Release 已创建: ${TAG}"

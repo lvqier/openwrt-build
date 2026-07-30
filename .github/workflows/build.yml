@@ -1,0 +1,187 @@
+name: build
+
+# 触发条件
+#   push: 相关文件变更时按 device.list 构建（每个 target/subtarget 一个构建任务，每个 profile 一个产物）
+#   workflow_dispatch: 手动触发，可指定 dist / build_packages / feeds / mirror
+on:
+  push:
+    branches: [ main ]
+    paths:
+      - 'build.sh'
+      - 'build-packages.sh'
+      - 'common.sh'
+      - 'package.list'
+      - 'device.list'
+      - 'files/**'
+      - 'packages/**'
+      - '.github/workflows/build.yml'
+  workflow_dispatch:
+    inputs:
+      dist:
+        description: 'OpenWrt 版本（snapshots 表示快照）'
+        required: true
+        default: '25.12.5'
+      build_packages:
+        description: '从源码构建 package.list 中的包'
+        type: boolean
+        default: true
+      feeds:
+        description: 'FEEDS 列表（逗号分隔，默认 luci；填 all 表示全部）'
+        required: false
+        default: 'luci'
+      mirror:
+        description: '镜像源（留空=官方）'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # 作业1: 解析 device.list，生成「架构矩阵」(构建用) 与「profile 矩阵」(拆包用)
+  matrix:
+    runs-on: ubuntu-latest
+    outputs:
+      arches: ${{ steps.gen.outputs.arches }}
+      profiles: ${{ steps.gen.outputs.profiles }}
+      dist: ${{ steps.gen.outputs.dist }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: 生成矩阵
+        id: gen
+        env:
+          EV: ${{ github.event_name }}
+          IN_DIST: ${{ inputs.dist }}
+        run: |
+          set -eu
+          if [ "$EV" = "workflow_dispatch" ] || [ "$EV" = "workflow_call" ]; then
+            DIST="$IN_DIST"
+          else
+            DIST=25.12.5
+          fi
+          echo "dist=$DIST" >> "$GITHUB_OUTPUT"
+          # 架构矩阵：唯一 (target, subtarget)，每个架构一个构建任务（避免重复下载/构建）
+          arches_inc=$(awk '
+            /^[[:space:]]*[^#[:space:]]/ {
+              k=$1" "$2
+              if (!(k in s)) { s[k]=1; printf "%s{\"target\":\"%s\",\"subtarget\":\"%s\"}", (n++?",":""), $1, $2 }
+            }
+          ' device.list)
+          # profile 矩阵：每个 (target, subtarget, profile)，用于把每个 profile 拆成独立产物
+          profiles_inc=$(awk '
+            /^[[:space:]]*[^#[:space:]]/ {
+              printf "%s{\"target\":\"%s\",\"subtarget\":\"%s\",\"profile\":\"%s\"}", (n++?",":""), $1, $2, $3
+            }
+          ' device.list)
+          echo "arches={\"include\":[$arches_inc]}" >> "$GITHUB_OUTPUT"
+          echo "profiles={\"include\":[$profiles_inc]}" >> "$GITHUB_OUTPUT"
+          echo "架构矩阵: $arches_inc"
+          echo "profile 矩阵: $profiles_inc"
+
+  # 作业2: 每个 target/subtarget 一个构建任务（构建 SDK + package.list 一次，构建该架构所有 profile）
+  build:
+    needs: matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      matrix: ${{ fromJSON(needs.matrix.outputs.arches) }}
+      fail-fast: false
+      max-parallel: 8
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: 设置构建参数
+        env:
+          EV: ${{ github.event_name }}
+          IN_BP: ${{ inputs.build_packages }}
+          IN_FEEDS: ${{ inputs.feeds }}
+          IN_MIRROR: ${{ inputs.mirror }}
+        run: |
+          set -eu
+          if [ "$EV" = "workflow_dispatch" ] || [ "$EV" = "workflow_call" ]; then
+            BP=0; [ "$IN_BP" = "true" ] && BP=1
+            echo "FEEDS=$IN_FEEDS" >> "$GITHUB_ENV"
+            if [ -n "$IN_MIRROR" ]; then echo "OPENWRT_PKG_MIRROR=$IN_MIRROR" >> "$GITHUB_ENV"; fi
+          else
+            BP=1
+            echo "FEEDS=luci" >> "$GITHUB_ENV"
+          fi
+          echo "BUILD_PACKAGES=$BP" >> "$GITHUB_ENV"
+          echo "::notice::arch=${{ matrix.target }}/${{ matrix.subtarget }} dist=${{ needs.matrix.outputs.dist }} build_packages=$BP feeds=${FEEDS:-all}"
+
+      - name: 安装依赖
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential git curl wget zstd python3 ca-certificates rsync xz-utils openssl file libncurses-dev
+
+      - name: 缓存 build 目录
+        uses: actions/cache@v4
+        with:
+          path: build
+          key: build-${{ matrix.target }}-${{ matrix.subtarget }}-${{ needs.matrix.outputs.dist }}-${{ runner.os }}
+
+      - name: 构建固件（本架构所有 profile）
+        run: |
+          ./build.sh --arch "${{ matrix.target }}" "${{ matrix.subtarget }}" "${{ needs.matrix.outputs.dist }}"
+
+      - name: 列出产物
+        if: always()
+        run: |
+          echo "::group::本架构产物（dist/）"
+          find dist -type f 2>/dev/null | sort | sed 's/^/  /' || true
+          echo "::endgroup::"
+
+      - name: 上传中间产物（含本架构各 profile）
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-${{ matrix.target }}-${{ matrix.subtarget }}
+          path: dist/
+          if-no-files-found: warn
+          retention-days: 1
+
+  # 作业3: 每个 profile 一个节点，从中间产物拆出该 profile 的独立产物
+  publish:
+    needs: [matrix, build]
+    runs-on: ubuntu-latest
+    strategy:
+      matrix: ${{ fromJSON(needs.matrix.outputs.profiles) }}
+      fail-fast: false
+      max-parallel: 8
+    steps:
+      - name: 下载本架构中间产物
+        uses: actions/download-artifact@v4
+        with:
+          name: build-${{ matrix.target }}-${{ matrix.subtarget }}
+          path: dl
+
+      - name: 上传该 profile 的独立产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: openwrt-${{ needs.matrix.outputs.dist }}-${{ matrix.profile }}
+          path: dl/${{ matrix.profile }}/
+          if-no-files-found: warn
+          retention-days: 14
+
+  # 作业4: 删除中间产物，只保留按 profile 的最终产物
+  cleanup:
+    needs: [build, publish]
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: 删除中间产物 build-*
+        uses: geekyeggo/delete-artifact@v5
+        with:
+          name: build-*
+          failOnError: false

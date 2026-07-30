@@ -1,0 +1,17 @@
+# 支持的设备清单，每行: <target> <sub_target> <profile>
+# profile 名称必须与 ImageBuilder 的 "make info" 列出的完全一致（格式通常为 <vendor>_<model>）。
+# 以 # 开头的行为注释，空行忽略。
+
+# Xiaomi Redmi Router AX6000 (MT7986A, filogic)
+#   两种布局可选：-stock（原厂分区布局）/ -ubootmod（OpenWrt U-Boot 布局）
+mediatek filogic xiaomi_redmi-router-ax6000-ubootmod
+# mediatek filogic xiaomi_redmi-router-ax6000-stock
+
+# JDCloud AX6600 (RE-CP-03, MT7986A, filogic)
+mediatek filogic jdcloud_re-cp-03
+
+# Xiaomi Redmi Router AC2100 (MT7621, ramips/mt7621)
+ramips mt7621 xiaomi_redmi-router-ac2100
+
+# Xiaomi Mi Router 3G (MT7621, ramips/mt7621)
+ramips mt7621 xiaomi_mi-router-3g
